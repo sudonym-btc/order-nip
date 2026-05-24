@@ -6,9 +6,9 @@ Orders
 
 `draft` `optional`
 
-This NIP defines a protocol for creating, negotiating, committing, cancelling, and reviewing orders against NIP-99 listings on Nostr. It introduces `kind:32122` order events, `kind:1326` append-only order transition events, `kind:1327` private structured-message rumors, `kind:1328` commit authorization helper events, `kind:1329` temporary trade key (temp-key) authorization helper events, and `kind:31555` reviews.
+This NIP defines a protocol for creating, negotiating, committing, cancelling, and reviewing orders against NIP-99 listings on Nostr. It introduces `kind:32122` order events, `kind:1327` private structured-message rumors, `kind:1328` commit authorization helper events, `kind:1329` temporary trade key (temp-key) authorization helper events, and `kind:31555` reviews.
 
-Negotiation is private. Signed order and escrow-selection events are sent as child events inside encrypted structured-message rumors and delivered with NIP-59 gift wraps. Public committed/cancelled order snapshots and transition records are published to relays chosen by the implementation.
+Negotiation is private. Signed order and escrow-selection events are sent as child events inside encrypted structured-message rumors and delivered with NIP-59 gift wraps. Public committed/cancelled order snapshots are published to relays chosen by the implementation.
 
 ## Terms
 
@@ -24,11 +24,12 @@ Negotiation is private. Signed order and escrow-selection events are sent as chi
 | Kind    | Name                    | Type                      | Description |
 | ------- | ----------------------- | ------------------------- | ----------- |
 | `32122` | Order             | Parameterized replaceable | A participant's order proposal, commitment, or cancellation. |
-| `1326`  | Order Transition  | Regular                   | Append-only audit record of an order stage change. |
 | `1327`  | Structured Message      | Regular private rumor     | Private structured-message rumor whose content is a signed child event JSON string. |
 | `1328`  | Commit Authorization    | Regular helper event      | Seller authorization over exact negotiated commit terms. |
 | `1329`  | Temp-Key Authorization  | Regular helper event      | Identity-key authorization binding a real participant pubkey to a temporary trade key (temp-key) participant pubkey. |
 | `31555` | Review                  | Parameterized replaceable | Post-trade marketplace review. |
+
+<!-- Order Transition kind 1326 event kind intentionally commented out. -->
 
 ## Order (`kind:32122`)
 
@@ -180,84 +181,78 @@ Content:
 
 The order is authorized only if the commit authorization was signed by the listing owner, references the same listing anchor and trade id, and contains the order's commit hash.
 
+## Negotiation Semantics
+
+Negotiation is an append-only private thread of valid `stage=negotiate` and
+private `stage=cancel` order child events sharing the same trade id.
+
+The current negotiation state is the newest valid order child event in the
+private thread. If that item has `stage=cancel`, the private negotiation is
+cancelled; otherwise the current offer is the newest valid `stage=negotiate`
+order child event. Clients SHOULD order private order child events the same way
+NIP-17 direct-message clients order messages in a chat room after unwrapping and
+decrypting them: use the decrypted inner event's `created_at`, not the
+randomized seal or gift-wrap `created_at` values. If two valid items have the
+same timestamp, clients SHOULD use a deterministic tie-break such as event id.
+
+A valid negotiation item MUST:
+
+1. reference the same listing anchor and trade id;
+2. be authored by the buyer participant, seller participant, or a temporary
+   trade key authorized by a valid `participant_proof`;
+3. be delivered in the private thread for the resolved participants of that
+   order;
+4. have valid order content and valid participant proofs when temporary trade
+   keys are used.
+
+When the seller responds to an offer, the seller MUST send a signed
+`stage=negotiate` order child event containing a signed `commitAuthorization`
+that authorizes the response order's commit hash. A seller counteroffer without
+`commitAuthorization` is only an unsigned proposal and MUST NOT be treated as
+accepted.
+
+In the negotiation phase, an accept action is indicated by either:
+
+- the seller sending back a valid signed `stage=negotiate` order containing a
+  valid `commitAuthorization`; or
+- the buyer executing payment and publishing a public `stage=commit` order with
+  payment proof.
+
+## Accepted Live Orders
+
+A trade is an accepted live order when one of the following is true after
+validating the relevant private thread and public order group:
+
+1. the latest payable terms have a seller-signed `commitAuthorization`;
+2. the seller has published a counterpart `stage=commit` order for the same
+   trade id and listing anchor;
+3. the listing has `autoAccept=true` and the buyer has published a `stage=commit`
+   order with valid payment proof for the full required amount, even without
+   explicit seller acknowledgement.
+
+An accepted live order is not necessarily final financial settlement. Escrow
+confirmation, dispute resolution, payment release, or cancellation policies may
+still apply.
+
 ## Private Structured Messages (`kind:1327`)
 
 Private structured trade messages use `kind:1327` as the inner rumor kind. The rumor `content` is the JSON string of a signed child event, usually a `kind:32122` order or `kind:30302` escrow-service selection.
 
 The rumor includes `p` tags for the recipients and SHOULD include `["conversation", "<trade-id>"]` for trade-related messages. The `conversation` tag is the private-message grouping mechanism; order and escrow-selection child events do not carry their own grouping tag. The rumor MAY include `alt` tags. It is sealed and wrapped with NIP-59. The sender broadcasts one `kind:1059` gift wrap for every recipient and one for self.
 
+Private trade DMs MUST be sent between the resolved participant pubkeys of the
+order. A resolved participant pubkey is the participant identity pubkey when a
+temporary trade key is authorized by `participant_proof`, otherwise it is the
+participant order pubkey. Buyer/seller negotiation messages SHOULD include the
+resolved buyer and seller participants. If a committed order is disputed, the
+participants SHOULD add the escrow service pubkey to the same participant
+thread, keep the same `conversation` trade id, and message the buyer, seller,
+and escrow together. Implementations SHOULD NOT create an escrow-only side
+conversation for disputes about a committed order.
+
 Plain text private messages use standard private message rumor kind `14`.
 
-## Order Transition (`kind:1326`)
-
-Every public order stage change MUST be accompanied by a transition event. Transitions form an append-only audit trail per participant.
-
-Order transitions are not the source of truth for order state because they are self-published by individual participants. Clients derive public state from validated order snapshots, payment proofs, escrow confirmations, and the order-group ordering rules below. However, a participant that publishes an invalid transition tree risks creating an unusable audit trail; an escrow may arbitrate against that participant if it cannot follow their updates to the order state.
-
-### Tags
-
-```json
-[
-  ["d", "<trade-id>"],
-  ["t", "<trade-id>"],
-  ["e", "<order-event-id>"],
-  ["prev", "<previous-transition-event-id>"],
-  ["a", "<listing-anchor>"]
-]
-```
-
-| Tag | Required | Description |
-| --- | -------- | ----------- |
-| `d` | Yes | Canonical trade identifier matching the order `d` tag. Consumers MUST use this tag for order-transition identity and lookups. |
-| `t` | No | Backward-compatible trade-id hashtag/search tag. When present it MUST equal `d`. Publishers SHOULD include it while older consumers still query transitions by `#t`; consumers MAY query it as a fallback but MUST NOT treat it as canonical. |
-| `e` | Yes | Order event this transition applies to. |
-| `prev` | No | Previous transition event id in this participant's transition chain. Omit only for the first transition. |
-| `a` | No | Listing anchor. SHOULD be included when known. |
-
-### Content
-
-```jsonc
-{
-  "transitionType": "commit",
-  "fromStage": "negotiate",
-  "toStage": "commit",
-  "commitTermsHash": "<sha256-hex>",
-  "reason": "Accepted by seller",
-  "updatedFields": {}
-}
-```
-
-| Field | Type | Required | Description |
-| ----- | ---- | -------- | ----------- |
-| `transitionType` | string | Yes | One of `counterOffer`, `commit`, `cancel`, `confirm`. |
-| `fromStage` | string | Yes | Stage before this transition. |
-| `toStage` | string | Yes | Stage after this transition. |
-| `commitTermsHash` | string | No | Commit-terms hash at the time of transition. |
-| `reason` | string | No | Human-readable explanation. |
-| `updatedFields` | object | No | Snapshot of changed fields, useful for counteroffers. |
-
-### State Machine
-
-Legal transitions per participant:
-
-```
-negotiate -> negotiate   counterOffer
-negotiate -> commit      commit
-negotiate -> cancel      cancel
-commit    -> cancel      cancel
-commit    -> commit      confirm
-```
-
-Clients MUST validate:
-
-1. each transition's `(fromStage, toStage)` is legal for its `transitionType`;
-2. consecutive transitions chain correctly: previous `toStage == next fromStage`;
-3. transition order is derived from the `prev` chain, not from `created_at`;
-4. disconnected chains, multiple roots, and forks are invalid unless resolved by application policy.
-
-### Escrow Monotonicity
-
-Escrow MAY publish `negotiate -> commit` or `negotiate -> cancel` before accepting a trade. Escrow MUST NOT publish `commit -> cancel`. Once escrow confirms a funded trade, financial resolution must happen through payment settlement, claim, release, or arbitration rather than by erasing the committed order state.
+<!-- Order Transition kind 1326 section intentionally commented out. -->
 
 ## Verification
 
@@ -272,35 +267,57 @@ Availability verification is based on public order groups after applying the val
 
 A `commit` order SHOULD include a `proof` object unless it is a seller-published blocked order.
 
+The `proof.paymentProof` object is the generic payment evidence. It is keyed by
+the payment method enum and carries method-specific `params`. Escrow-specific
+verification context, when needed, is attached beside the generic payment proof
+under `proof.escrow`.
+
+Defined payment methods are `"zap"` for NIP-57 zap receipts and `"evm"` for EVM
+transaction proofs. Escrow service types MAY map to payment methods; for
+example, escrow service type `"EVM"` uses payment method `"evm"`.
+
 ### Zap Proof
 
 ```jsonc
 {
-  "seller": { "...": "seller profile/event JSON" },
   "listing": { "...": "NIP-99 listing event JSON" },
-  "zapProof": {
-    "receipt": { "...": "zap receipt event JSON" }
-  },
-  "escrowProof": null
+  "paymentProof": {
+    "method": "zap",
+    "params": {
+      "receipt": { "...": "zap receipt event JSON" },
+      "recipientProfile": { "...": "seller profile metadata event JSON" }
+    }
+  }
 }
 ```
+
+For zap proofs, `recipientProfile` is required so clients can verify that the
+zap receipt LNURL matches the seller's signed current payment address.
 
 ### Escrow Proof
 
 ```jsonc
 {
-  "seller": { "...": "seller profile/event JSON" },
   "listing": { "...": "NIP-99 listing event JSON" },
-  "zapProof": null,
-  "escrowProof": {
-    "txHash": "<evm-transaction-hash>",
+  "paymentProof": {
+    "method": "evm",
+    "params": {
+      "txHash": "<evm-transaction-hash>"
+    }
+  },
+  "escrow": {
     "escrowService": "<JSON string of the EscrowService kind:30303 event>",
-    "sellerEscrowMethods": "<JSON string of the seller's EscrowMethod kind:17388 event>"
+    "sellerEscrowMethod": "<JSON string of the seller's EscrowMethod kind:17388 event>"
   }
 }
 ```
 
-See the Escrow Services NIP for escrow verification requirements.
+For EVM escrow-backed orders, `paymentProof.method` MUST be `"evm"` and
+`paymentProof.params.txHash` is the transaction hash to verify. The `escrow`
+context is required only to interpret that EVM payment proof as satisfying a
+selected escrow method. `sellerEscrowMethod` MUST include the seller's `["i",
+"evm:address:<address>", "eip191:<signature>"]` ownership proof. See the Escrow
+Services NIP for the exact proof payload and escrow verification requirements.
 
 ### Seller-Published Orders
 
@@ -402,12 +419,12 @@ This NIP does not define a canonical on-chain or block-time proof that the revie
 2. Buyer allocates a trade id and temporary trade key (temp-key). Deterministic derivation is optional and described in the addendum below.
 3. Buyer creates a `kind:32122` order with `stage=negotiate`, signed by the temporary trade key (temp-key).
 4. Buyer includes role-marked participant `p` tags and encrypted `participant_proof` tags as needed.
-5. Buyer sends the order as a child event inside a private `kind:1327` rumor tagged `["conversation", "<trade-id>"]`, delivered with NIP-59 gift wraps to the seller and self.
+5. Buyer sends the order as a child event inside a private `kind:1327` rumor tagged `["conversation", "<trade-id>"]`, delivered with NIP-59 gift wraps to the resolved seller participant and self.
 
 ### 2. Negotiation
 
-6. Seller reviews the request. If counter-offering, seller creates a new `stage=negotiate` order with changed terms.
-7. If the seller accepts negotiated terms, the seller signs a `kind:1328` commit authorization and embeds it in the order content.
+6. Seller reviews the request. If counter-offering, seller creates a new `stage=negotiate` order with changed terms and embeds a signed `kind:1328` commit authorization for those terms.
+7. If the seller accepts the current terms, the seller replies with a `stage=negotiate` order for those terms and embeds a signed `kind:1328` commit authorization.
 8. Counteroffers continue privately until terms are accepted or cancelled.
 
 ### 3. Escrow Selection and Payment
@@ -418,12 +435,12 @@ This NIP does not define a canonical on-chain or block-time proof that the revie
 ### 4. Commitment
 
 11. Once payment proof exists, the buyer or temporary trade key (temp-key) publishes a public `stage=commit` `kind:32122` order with `proof`.
-12. A matching `kind:1326` transition is published.
-13. Seller or escrow MAY publish their own `stage=commit` order/confirmation.
+<!-- Order Transition publication step intentionally commented out. -->
+12. Seller or escrow MAY publish their own `stage=commit` order/confirmation.
 
 ### 5. Cancellation
 
-Either party MAY cancel a private negotiation with a private `stage=cancel` order child event. After public commitment, cancellation publishes a public `stage=cancel` order plus a `kind:1326` cancel transition. Escrow may only cancel before it has committed.
+Either party MAY cancel a private negotiation with a private `stage=cancel` order child event. After public commitment, cancellation publishes a public `stage=cancel` order. Escrow may only cancel before it has committed.
 
 ## Availability
 
