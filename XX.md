@@ -318,7 +318,7 @@ Payment content is JSON:
     },
     "escrow": {
       "escrowService": { "...": "EscrowService kind:30303 event JSON" },
-      "sellerEscrowMethod": { "...": "seller EscrowMethod kind:17388 event JSON" }
+      "paymentMethod": { "...": "seller payment method kind:17388 event JSON" }
     }
   },
   "purpose": "order.payment"
@@ -364,7 +364,7 @@ zap receipt LNURL matches the seller's signed current payment address.
   },
   "escrow": {
     "escrowService": { "...": "EscrowService kind:30303 event JSON" },
-    "sellerEscrowMethod": { "...": "seller EscrowMethod kind:17388 event JSON" }
+    "paymentMethod": { "...": "seller payment method kind:17388 event JSON" }
   }
 }
 ```
@@ -372,7 +372,7 @@ zap receipt LNURL matches the seller's signed current payment address.
 For EVM escrow-backed orders, `paymentProof.method` MUST be `"evm"` and
 `paymentProof.params.txHash` is the transaction hash to verify. The `escrow`
 context is required only to interpret that EVM payment proof as satisfying a
-selected escrow method. `sellerEscrowMethod` MUST include the seller's `["i",
+selected payment method. `paymentMethod` MUST include the seller's `["i",
 "evm:address:<address>", "eip191:<signature>"]` ownership proof. See the Escrow
 Services NIP for the exact proof payload and escrow verification requirements.
 The on-chain escrow `tradeId` proved by the transaction MUST equal the order
@@ -605,7 +605,7 @@ The `rating` tag contains the primary rating. The third element MUST be `thumb`.
 
 The `r` tag contains an order anchor (`<kind>:<pubkey>:<d-tag>`) linking the review to a specific trade participant event.
 
-The `review_proof` tag is Hostr-specific and MAY be omitted when the review is signed directly by an order participant pubkey. Clients SHOULD include it when the review is signed by an identity key but the public order participant is a temporary trade key. Generic Gamma-compatible clients can ignore this tag.
+The `review_proof` tag is marketplace-specific and MAY be omitted when the review is signed directly by an order participant pubkey. Clients SHOULD include it when the review is signed by an identity key but the public order participant is a temporary trade key. Generic Gamma-compatible clients can ignore this tag.
 
 ### Content
 
