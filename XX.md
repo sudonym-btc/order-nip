@@ -8,18 +8,18 @@ Orders
 
 This NIP defines a protocol for creating, negotiating, funding, acknowledging, settling, cancelling, and reviewing orders against NIP-99 listings on Nostr. It introduces `kind:32122` order events, `kind:32123` payment events, `kind:32124` payment ack events, `kind:32125` payment settlement events, `kind:32126` order cancel events, `kind:32127` payment nack events, `kind:1327` private structured-message rumors, `kind:1328` commit authorization helper events, `kind:1329` temporary trade key (temp-key) authorization helper events, `kind:1330` encrypted marketplace seed events, and `kind:31555` reviews.
 
-Negotiation is private. Signed order and escrow-selection events are sent as child events inside encrypted structured-message rumors and delivered with NIP-59 gift wraps. Public lifecycle events are published to relays chosen by the implementation after funding or cancellation. Payment evidence is not embedded in the order event; it is carried by linked payment lifecycle events.
+Negotiation is private. Signed order and arbitration-service-selection events are sent as child events inside encrypted structured-message rumors and delivered with NIP-59 gift wraps. Public lifecycle events are published to relays chosen by the implementation after funding or cancellation. Payment evidence is not embedded in the order event; it is carried by linked payment lifecycle events.
 
 ## Terms
 
 - **Buyer** — Nostr user requesting an order.
 - **Seller** — Nostr user who owns the listing receiving the order.
-- **Escrow** — Optional service participant that verifies funding and can arbitrate disputes.
+- **Arbiter** — Optional service participant that verifies funding and can arbitrate disputes.
 - **Trade** — A single order negotiation and lifecycle, identified by a stable `trade` tag (trade ID). Private trade messages use this trade ID as their default `conversation` tag.
 - **Order Group** — The public replaceable order-state slot for one immutable role-tagged participant tuple inside a trade.
 - **Order Group ID** — A deterministic SHA-256 hash derived from the trade ID and the role-tagged public participant pubkeys in the order. `kind:32122` uses this value as its `d` tag.
 - **Listing Anchor** — A NIP-99 listing address in the format `<listing-kind>:<seller-pubkey>:<listing-d-tag>`.
-- **Temporary Trade Key (Temp-Key)** — A per-trade Nostr key that can publish buyer-side order events without revealing the buyer's long-lived account key on public relays. The buyer's account identity is bound to this temporary key through encrypted `participant_proof` tags, preserving buyer privacy while still allowing counterparties, escrows, and review verifiers to prove participation when needed.
+- **Temporary Trade Key (Temp-Key)** — A per-trade Nostr key that can publish buyer-side order events without revealing the buyer's long-lived account key on public relays. The buyer's account identity is bound to this temporary key through versioned `participant_proof` tags. Proofs can be public when deliberate disclosure is desired, or sealed with recipient `participant_proof_key` wraps when only selected participants should read them.
 
 ## Event Kinds
 
@@ -27,10 +27,10 @@ Negotiation is private. Signed order and escrow-selection events are sent as chi
 | ------- | ----------------------- | ------------------------- | ----------- |
 | `32122` | Order                   | Parameterized replaceable | Terms, listing anchor, trade id, and immutable public participant tuple for an order group. |
 | `32123` | Payment                 | Parameterized replaceable | Payment proof or payment lock linked to an order. |
-| `32124` | Payment Ack             | Parameterized replaceable | Buyer, seller, or escrow acceptance of a payment event. |
+| `32124` | Payment Ack             | Parameterized replaceable | Buyer, seller, or arbiter acceptance of a payment event. |
 | `32125` | Payment Settlement      | Parameterized replaceable | Settlement, release, refund, split, or claim packet linked to a payment event. |
 | `32126` | Order Cancel            | Parameterized replaceable | Cancellation request or cancellation notice linked to an order or payment event. |
-| `32127` | Payment Nack            | Parameterized replaceable | Buyer, seller, or escrow rejection of a payment event. |
+| `32127` | Payment Nack            | Parameterized replaceable | Buyer, seller, or arbiter rejection of a payment event. |
 | `1327`  | Structured Message      | Regular private rumor     | Private structured-message rumor whose content is a signed child event JSON string. |
 | `1328`  | Commit Authorization    | Regular helper event      | Seller authorization over exact negotiated commit terms. |
 | `1329`  | Temp-Key Authorization  | Regular helper event      | Identity-key authorization binding a real participant pubkey to a temporary trade key (temp-key) participant pubkey. |
@@ -53,7 +53,8 @@ Negotiation orders are usually sent privately as structured-message child events
   ["trade", "<trade-id>"],
   ["a", "<listing-anchor>"],
   ["p", "<participant-pubkey>", "<relay-hint>", "<role>"],
-  ["participant_proof", "<role>", "<participant-pubkey>", "<recipient-pubkey>", "nip44", "<payload-sha256>", "<encrypted-payload>"],
+  ["participant_proof", "1", "<role>", "<participant-pubkey>", "<proof-id>", "<public-or-sealed-mode>", "<payload>"],
+  ["participant_proof_key", "1", "<proof-id>", "<recipient-pubkey>", "<sender-pubkey>", "nip44", "<encrypted-disclosure-key>"],
   ["published_at", "<unix-seconds>"]
 ]
 ```
@@ -63,8 +64,9 @@ Negotiation orders are usually sent privately as structured-message child events
 | `d` | Yes | Order group ID. This is the parameterized replaceable key for a participant's current public order state. It MUST be derived from the `trade` tag and the order's role-tagged participant `p` tags as described in the Order Group section. |
 | `trade` | Yes | Trade identifier. Stable across the negotiation and lifecycle. Private trade messages SHOULD repeat this value in a `conversation` tag on the enclosing rumor. |
 | `a` | Yes | Listing anchor (`<listing-kind>:<seller-pubkey>:<listing-d-tag>`). The referenced event MUST be a NIP-99 listing. |
-| `p` | Yes | Role-tagged participant pubkey. Use `["p", pubkey, relayHint, role]` where role is `buyer`, `seller`, or `escrow`. Every order MUST include exactly one `buyer` and exactly one `seller` participant. Escrow-backed public order groups MUST also include exactly one `escrow` participant. Private negotiation orders before escrow selection MAY omit the `escrow` participant. The event author MUST appear in exactly one participant `p` tag, and that tag's role is the author's order role. Use privacy-preserving temporary trade keys (temp-keys) as participant pubkeys when possible; bind temp-keys to real pubkeys with `participant_proof` tags. The escrow service pubkey MUST be included as the escrow participant for escrow-backed public orders so escrow daemons can subscribe to their own trades. |
-| `participant_proof` | No | Encrypted proof binding a temporary trade key (temp-key) participant pubkey to a real identity pubkey. Required when `participantPubkey != identityPubkey`. |
+| `p` | Yes | Role-tagged participant pubkey. Use `["p", pubkey, relayHint, role]` where role is `buyer`, `seller`, or `arbiter`. Every order MUST include exactly one `buyer` and exactly one `seller` participant. Escrow-backed public order groups MUST also include exactly one `arbiter` participant. Private negotiation orders before arbitration service selection MAY omit the `arbiter` participant. The event author MUST appear in exactly one participant `p` tag, and that tag's role is the author's order role. Use privacy-preserving temporary trade keys (temp-keys) as participant pubkeys when possible; bind temp-keys to real pubkeys with `participant_proof` tags. The arbitration service pubkey MUST be included as the arbiter participant for escrow-backed public orders so arbiter daemons can subscribe to their own trades. |
+| `participant_proof` | No | Versioned proof binding a temporary trade key (temp-key) participant pubkey to a real identity pubkey. Required when `participantPubkey != identityPubkey` and reusable on orders, auction bids, and reviews. |
+| `participant_proof_key` | No | NIP-44 key wrap that lets a recipient decrypt a sealed `participant_proof`. Required for each intended recipient when a proof uses `sealed:v1` mode. |
 | `published_at` | No | First publication timestamp. Publishers SHOULD preserve this across replacements. |
 
 ### Participant Proofs
@@ -76,16 +78,51 @@ Participant proofs bind temporary trade key (temp-key) participant pubkeys to re
 ```json
 [
   "participant_proof",
+  "1",
   "<role>",
   "<participant-pubkey>",
-  "<recipient-pubkey>",
-  "nip44",
-  "<sha256-of-plaintext-authorization>",
-  "<nip44-encrypted-authorization-payload>"
+  "<proof-id>",
+  "public",
+  "<signed-kind-1329-event-json>"
 ]
 ```
 
-The plaintext authorization payload is a JSON-encoded signed `kind:1329` Temp-Key Authorization event. It is encrypted with NIP-44 for each trade participant recipient.
+For private disclosure, use the same tag with `sealed:v1` mode:
+
+```json
+[
+  "participant_proof",
+  "1",
+  "<role>",
+  "<participant-pubkey>",
+  "<proof-id>",
+  "sealed:v1",
+  "<sealed-authorization-payload>"
+]
+```
+
+The plaintext authorization payload is a JSON-encoded signed `kind:1329`
+Temp-Key Authorization event. `proof-id` is the event id of that signed
+authorization. A public proof places the signed authorization JSON directly in
+the tag payload. A sealed proof encrypts that JSON with a random disclosure key.
+The disclosure key is then wrapped to each intended recipient:
+
+```json
+[
+  "participant_proof_key",
+  "1",
+  "<proof-id>",
+  "<recipient-pubkey>",
+  "<sender-pubkey>",
+  "nip44",
+  "<nip44-encrypted-disclosure-key>"
+]
+```
+
+The `participant_proof` and `participant_proof_key` tag formats are shared by
+orders, auction bids, and reviews. Clients MUST NOT use legacy
+`review_proof`, `participant_proof_enc`, or unversioned participant proof tag
+formats.
 
 #### Temp-Key Authorization (`kind:1329`)
 
@@ -111,9 +148,9 @@ Content:
 }
 ```
 
-A verifier accepts a participant proof only when:
+A verifier accepts a public or successfully decrypted participant proof only when:
 
-1. the `participant_proof` hash matches the decrypted authorization payload;
+1. the authorization event id equals the `participant_proof` proof id;
 2. the authorization event is validly signed by the identity pubkey;
 3. the authorization `a` tag matches the listing anchor;
 4. the authorization `trade` tag matches the order trade id;
@@ -134,6 +171,7 @@ Order content is JSON:
     "denomination": "BTC",
     "decimals": 8
   },
+  "listing": { "...": "signed NIP-99 listing event JSON" },
   "recipient": "<recipient-or-trade-pubkey>",
   "commitAuthorization": null
 }
@@ -145,8 +183,15 @@ Order content is JSON:
 | `end` | string | No | Order end date/time in ISO 8601 UTC. This field MUST be omitted when no end is set. |
 | `quantity` | integer | No | Number of units. Default `1`. |
 | `amount` | object | No | Agreed or proposed price. `value` is a decimal string, `denomination` is the unit of account, and `decimals` is precision. |
+| `listing` | object | Public purchase orders: Yes. Private negotiation proposals: SHOULD. | Full signed NIP-99 listing event JSON captured at order creation time. This snapshot lets validators derive price and listing terms from the order itself without fetching mutable relay state. |
 | `recipient` | string | No | Intended payment/trade recipient pubkey. |
 | `commitAuthorization` | object | No | Full signed `kind:1328` event JSON authorizing negotiated terms. |
+
+When present, `listing` MUST be a valid signed NIP-99 listing event. Its event
+address MUST equal the order `a` tag, and the seller participant SHOULD match
+the listing event author. Public purchase orders that omit the listing snapshot
+cannot be fully verified without external relay lookups and SHOULD be treated as
+unverifiable by self-contained validators.
 
 ### Commit Terms
 
@@ -182,7 +227,7 @@ Content:
 }
 ```
 
-The order is authorized only if the commit authorization was signed by the listing owner, references the same listing anchor, trade id, and order group ID, and contains the order's commit hash. If the authorization is produced during private negotiation before the escrow participant is chosen, it MAY omit the `d` order group tag; in that case it authorizes only the trade ID and listing anchor and MUST be bound to the final order group by the committed order that embeds it.
+The order is authorized only if the commit authorization was signed by the listing owner, references the same listing anchor, trade id, and order group ID, and contains the order's commit hash. If the authorization is produced during private negotiation before the arbiter participant is chosen, it MAY omit the `d` order group tag; in that case it authorizes only the trade ID and listing anchor and MUST be bound to the final order group by the committed order that embeds it.
 
 ## Negotiation Semantics
 
@@ -190,7 +235,7 @@ Negotiation is an append-only private thread of valid order and cancel child
 events sharing the same trade id in the `trade` tag. The enclosing
 structured-message rumor SHOULD use
 `["conversation", "<trade-id>"]` so the buyer and seller can continue the same
-private thread before and after escrow selection.
+private thread before and after arbitration service selection.
 
 The current negotiation state is the newest valid order child event in the
 private thread, unless the newest valid child event is an Order Cancel event for
@@ -231,8 +276,9 @@ validating the relevant private thread and public order group:
 
 1. the latest payable terms have a seller-signed `commitAuthorization`;
 2. the seller has accepted the linked Payment event with a Payment Ack;
-3. the listing has `autoAccept=true` and the buyer has published a Payment event
-   with valid payment proof for the full required amount, even without
+3. the embedded listing snapshot has `autoAccept=true` and the buyer has
+   published a Payment event with valid payment proof whose validated terms
+   satisfy the order amount and listing-derived requirements, even without
    explicit seller acknowledgement.
 
 An accepted live order is not necessarily final financial settlement. Escrow
@@ -241,18 +287,18 @@ still apply.
 
 ## Private Structured Messages (`kind:1327`)
 
-Private structured trade messages use `kind:1327` as the inner rumor kind. The rumor `content` is the JSON string of a signed child event, usually a `kind:32122` order or `kind:30302` escrow-service selection.
+Private structured trade messages use `kind:1327` as the inner rumor kind. The rumor `content` is the JSON string of a signed child event, usually a `kind:32122` order or `kind:30302` arbitration-service selection.
 
-The rumor includes `p` tags for the recipients and SHOULD include `["conversation", "<trade-id>"]` for trade-related messages. The `conversation` tag is the private-message grouping mechanism and remains the stable trade id before and after escrow selection. Local inbox implementations MAY group gift wraps by the sorted set of rumor author plus rumor `p` tags, combined with the `conversation` tag; that local conversation id is not the order group id and MUST NOT be used for order validity. The rumor MAY include `alt` tags. It is sealed and wrapped with NIP-59. The sender broadcasts one `kind:1059` gift wrap for every recipient and one for self.
+The rumor includes `p` tags for the recipients and SHOULD include `["conversation", "<trade-id>"]` for trade-related messages. The `conversation` tag is the private-message grouping mechanism and remains the stable trade id before and after arbitration service selection. Local inbox implementations MAY group gift wraps by the sorted set of rumor author plus rumor `p` tags, combined with the `conversation` tag; that local conversation id is not the order group id and MUST NOT be used for order validity. The rumor MAY include `alt` tags. It is sealed and wrapped with NIP-59. The sender broadcasts one `kind:1059` gift wrap for every recipient and one for self.
 
 Private trade DMs MUST be sent between the resolved participant pubkeys of the
 order. A resolved participant pubkey is the participant identity pubkey when a
 temporary trade key is authorized by `participant_proof`, otherwise it is the
 participant order pubkey. Buyer/seller negotiation messages SHOULD include the
 resolved buyer and seller participants. If a committed order is disputed, the
-participants SHOULD add the escrow service pubkey to the same participant
+participants SHOULD add the arbitration service pubkey to the same participant
 thread, keep the same `conversation` trade id, and message the buyer, seller,
-and escrow together. Implementations SHOULD NOT create an escrow-only side
+and arbiter together. Implementations SHOULD NOT create an arbiter-only side
 conversation for disputes about a committed order.
 
 Plain text private messages use standard private message rumor kind `14`.
@@ -267,6 +313,22 @@ Clients verify orders for two primary reasons:
 2. to verify that reviews are attached to a real trade.
 
 Availability verification is based on public order groups after applying the validity and precedence rules in the Order Group section. Review verification proves that the reviewer participated in a structurally valid order group that reached confirmed commitment.
+
+Order verification is a separate step from payment proof verification:
+
+1. Verify the Payment proof using only the self-contained `paymentProof.params`
+   and the selected driver.
+2. Normalize the driver's verified payment terms, such as `paymentAmount`,
+   optional security bond amount, optional escrow fee, unlock time, asset, and
+   participant/payment identifiers.
+3. Verify the Order using the signed embedded listing snapshot. The validator
+   derives the expected price from the listing snapshot, `quantity`, `start`,
+   and `end`; compares the order amount to that derived price; and compares the
+   sum of accepted verified payment terms to the order requirements.
+
+Payment proof validation MUST NOT require the order or listing. Order
+validation MAY consume the normalized terms returned by one or more successful
+payment proof validations.
 
 ## Payment Lifecycle Events
 
@@ -303,43 +365,126 @@ Defined markers are:
 
 A Payment event contains the generic payment evidence or payment lock for an
 order. It MUST include `["e", "<order-event-id>", "<relay-hint>", "order"]`.
+Public payment proofs are the default. If the payer wants to hide the payment
+proof from public relays, the Payment event MAY instead carry a sealed payment
+proof envelope and `payment_proof_key` tags for the seller, arbiter, and payer's
+own trade key.
 
-Payment content is JSON:
+Public payment content is JSON:
 
 ```jsonc
 {
   "proof": {
-    "listing": { "...": "NIP-99 listing event JSON" },
     "paymentProof": {
-      "method": "evm",
+      "driver": "evm:multi-escrow",
       "params": {
-        "txHash": "<evm-transaction-hash>"
+        "txHash": "<evm-transaction-hash>",
+        "chainId": 33,
+        "tradeId": "<order-group-id>",
+        "sellerAddress": "<seller-evm-address>",
+        "arbiterAddress": "<arbiter-evm-address>",
+        "assetAddress": "<asset-address>",
+        "paymentAmount": "50000",
+        "bondAmount": "0",
+        "escrowFee": "0",
+        "unlockAt": "1781067882",
+        "denomination": "BTC",
+        "decimals": 8
       }
     },
-    "escrow": {
-      "escrowService": { "...": "EscrowService kind:30303 event JSON" },
+    "arbitration": {
+      "arbitrationService": { "...": "ArbitrationService kind:30303 event JSON" },
       "paymentMethod": { "...": "seller payment method kind:17388 event JSON" }
     }
   },
-  "purpose": "order.payment"
+  "purpose": "order_payment"
 }
 ```
 
-The `proof.paymentProof` object is keyed by the payment method enum and carries
-method-specific `params`. Escrow-specific verification context, when needed, is
-attached beside the generic payment proof under `proof.escrow`.
+The `proof.paymentProof` object is keyed by the payment driver and carries
+driver-specific `params`. Payment params MUST be self-contained verifier inputs:
+validators MUST NOT require the referenced order, auction bid, or listing event
+to determine whether the payment proof itself is valid. Order/bid/listing data
+MAY still be used by higher-level marketplace logic after proof validation.
+Arbitration-specific context, when needed, is attached beside the generic
+payment proof under `proof.arbitration`.
 
-Defined payment methods are `"zap"` for NIP-57 zap receipts and `"evm"` for EVM
-transaction proofs. Escrow service types MAY map to payment methods; for
-example, escrow service type `"EVM"` uses payment method `"evm"`.
+The entire `paymentProof.params` object MAY be encrypted while leaving the
+driver visible:
+
+```jsonc
+{
+  "paymentProof": {
+    "driver": "evm:multi-escrow",
+    "params": {
+      "encrypted": true,
+      "version": 1,
+      "scheme": "nip44",
+      "proofId": "<sha256-of-canonical-clear-params>",
+      "payload": "<sealed-payment-proof-params-payload>"
+    }
+  }
+}
+```
+
+When params are encrypted, the plaintext is the JSON-encoded clear params
+object. `proofId` is the SHA-256 hash of that canonical clear params object.
+The payer MUST add `payment_proof_key` tags for recipients that should decrypt
+the params, using the encrypted params `proofId` as the key id. This is separate
+from sealing the whole `proof` field; implementations MAY use either privacy
+mode, but validators must receive clear params or a decryptor before reading
+driver-specific fields.
+
+Sealed payment content uses the same `proof` field, but the value is a sealed
+envelope:
+
+```jsonc
+{
+  "proof": {
+    "version": 1,
+    "mode": "sealed:v1",
+    "proofId": "<sha256-of-canonical-public-payment-proof>",
+    "payload": "<sealed-payment-proof-payload>"
+  },
+  "purpose": "order_payment"
+}
+```
+
+When `mode` is `sealed:v1`, the plaintext is the JSON-encoded public payment
+proof object shown above. `proofId` is the SHA-256 hash of the canonical public
+payment proof. The payload is encrypted with a random disclosure key. The payer
+MUST add one `payment_proof_key` tag for every participant that should decrypt
+the payment proof:
+
+```json
+[
+  "payment_proof_key",
+  "1",
+  "<proof-id>",
+  "<recipient-pubkey>",
+  "<sender-pubkey>",
+  "nip44",
+  "<nip44-encrypted-disclosure-key>"
+]
+```
+
+For arbiter-backed payments, clients SHOULD wrap the disclosure key to the
+seller participant, the arbiter participant, and the payer's own trade pubkey.
+The wider public can still see that a payment event exists and can reduce the
+order group structurally, but cannot inspect the method-specific payment proof
+unless a recipient discloses it.
+
+Defined payment drivers include `"zap"` for NIP-57 zap receipts and concrete
+EVM/Cashu driver ids such as `"evm:multi-escrow"` or
+`"cashu:p2pk-escrow-v1"`. Arbitration service types MAY map to payment
+drivers; for example, an EVM arbitration service uses an EVM escrow driver.
 
 ### Zap Proof
 
 ```jsonc
 {
-  "listing": { "...": "NIP-99 listing event JSON" },
   "paymentProof": {
-    "method": "zap",
+    "driver": "zap",
     "params": {
       "receipt": { "...": "zap receipt event JSON" },
       "recipientProfile": { "...": "seller profile metadata event JSON" }
@@ -351,35 +496,46 @@ example, escrow service type `"EVM"` uses payment method `"evm"`.
 For zap proofs, `recipientProfile` is required so clients can verify that the
 zap receipt LNURL matches the seller's signed current payment address.
 
-### Escrow Proof
+### Arbitration Proof
 
 ```jsonc
 {
-  "listing": { "...": "NIP-99 listing event JSON" },
   "paymentProof": {
-    "method": "evm",
+    "driver": "evm:multi-escrow",
     "params": {
-      "txHash": "<evm-transaction-hash>"
+      "txHash": "<evm-transaction-hash>",
+      "chainId": 33,
+      "tradeId": "<order-group-id>",
+      "sellerAddress": "<seller-evm-address>",
+      "arbiterAddress": "<arbiter-evm-address>",
+      "assetAddress": "<asset-address>",
+      "paymentAmount": "50000",
+      "bondAmount": "0",
+      "escrowFee": "0",
+      "unlockAt": "1781067882",
+      "denomination": "BTC",
+      "decimals": 8
     }
   },
-  "escrow": {
-    "escrowService": { "...": "EscrowService kind:30303 event JSON" },
+  "arbitration": {
+    "arbitrationService": { "...": "ArbitrationService kind:30303 event JSON" },
     "paymentMethod": { "...": "seller payment method kind:17388 event JSON" }
   }
 }
 ```
 
-For EVM escrow-backed orders, `paymentProof.method` MUST be `"evm"` and
-`paymentProof.params.txHash` is the transaction hash to verify. The `escrow`
-context is required only to interpret that EVM payment proof as satisfying a
-selected payment method. `paymentMethod` MUST include the seller's `["i",
-"evm:address:<address>", "eip191:<signature>"]` ownership proof. See the Escrow
-Services NIP for the exact proof payload and escrow verification requirements.
-The on-chain escrow `tradeId` proved by the transaction MUST equal the order
-group ID in the payment event's `d` tag. EVM escrow proof now requires on-chain
-validation because the order event itself no longer carries authoritative
-payment state; this lets lightweight clients subscribe to order groups cheaply
-while payment-aware clients or escrow daemons validate the actual transaction.
+For EVM escrow-backed orders, `paymentProof.driver` identifies the concrete EVM
+driver and `paymentProof.params.txHash` is the transaction hash to verify.
+`params` MUST also include the payment construction data needed to compare the
+decoded `TradeCreated` log: chain id, trade id, seller, arbiter, asset,
+payment amount, optional bond amount, optional escrow fee, timeout claimant or
+unlock time when used, and context/recycle hashes when used. Contract address
+and bytecode hash MAY be omitted when the verifier has the driver configuration
+needed to locate the escrow contract. The `arbitration` context is required only
+to interpret that EVM payment proof as satisfying a selected payment method.
+`paymentMethod` MUST include the seller's `["i", "evm:address:<address>",
+"eip191:<signature>"]` ownership proof. See the Arbitration Services NIP for the
+exact proof payload and payment verification requirements.
 
 ### Payment Ack (`kind:32124`)
 
@@ -395,10 +551,12 @@ Content:
 }
 ```
 
-`status` MUST be `accepted`. Buyer and seller acknowledgements are used to
-represent both parties' agreement that the payment event funds the order.
-Escrow services MAY also publish Payment Ack events when they validate a payment
-proof.
+`status` MUST be `accepted`. A Payment Ack means the referenced Payment event's
+payment proof validated as a self-contained payment proof. It MUST NOT depend
+on the linked order, bid, listing snapshot, or any order/bid term reconciliation.
+Buyer, seller, and arbitration-service acknowledgements are payment lifecycle
+signals only; higher-level order validators MAY separately decide whether the
+validated payment terms satisfy the linked order.
 
 ### Payment Nack (`kind:32127`)
 
@@ -414,10 +572,11 @@ Content:
 }
 ```
 
-`status` MUST be `rejected`. Payment Nack events do not cancel an order by
-themselves; they explain why the referenced payment proof should not be treated
-as committed. If the trade is cancelled, an Order Cancel event is still
-required.
+`status` MUST be `rejected`. A Payment Nack means the referenced Payment event's
+payment proof failed payment-proof validation. It MUST NOT be used for failures
+that depend on the linked order, bid, listing snapshot, or order/bid term
+reconciliation. Payment Nack events do not cancel an order by themselves. If the
+trade is cancelled, an Order Cancel event is still required.
 
 ### Payment Settlement (`kind:32125`)
 
@@ -474,7 +633,7 @@ the refund/release/split MUST be represented by a Payment Settlement event.
 
 Seller proofless orders no longer rely on `order.pubkey == listing.pubkey`.
 Clients MUST use the role-tagged seller participant and, when a temporary trade
-key is used, the encrypted `participant_proof` authorization to reconcile the
+key is used, a valid public or sealed `participant_proof` authorization to reconcile the
 seller participant with the listing owner. A seller-authored order can block
 inventory only after that role proof is valid or application policy explicitly
 allows an unproven seller reservation.
@@ -500,7 +659,7 @@ sha256(json([
   sorted([
     ["buyer", "<buyer-participant-pubkey>"],
     ["seller", "<seller-participant-pubkey>"],
-    ["escrow", "<escrow-participant-pubkey>"]
+    ["arbiter", "<arbiter-participant-pubkey>"]
   ])
 ]))
 ```
@@ -512,15 +671,15 @@ canonical binary encoding if it is explicitly profiled by a future version of
 this NIP, but all participants in a marketplace MUST use the same encoding to
 produce the same `d` tag.
 
-Private negotiation orders before escrow selection use the same derivation with
-the available buyer and seller participant entries. When an escrow is selected,
+Private negotiation orders before arbitration service selection use the same derivation with
+the available buyer and seller participant entries. When an arbiter is selected,
 the escrow-backed order group has a different order group ID because the
-participant tuple now includes the `escrow` entry. The `trade` tag remains the
+participant tuple now includes the `arbiter` entry. The `trade` tag remains the
 same, so private messages can continue in the same trade conversation.
 
-Public escrow-backed order groups MUST include exactly one `buyer`, exactly one
-`seller`, and exactly one `escrow` participant `p` tag on the order anchor.
-Public non-escrow order groups MUST include exactly one `buyer` and exactly one
+Public arbiter-backed order groups MUST include exactly one `buyer`, exactly one
+`seller`, and exactly one `arbiter` participant `p` tag on the order anchor.
+Public non-arbiter order groups MUST include exactly one `buyer` and exactly one
 `seller` participant `p` tag. Events with missing required roles, duplicate
 roles, or a computed order group ID that does not equal the `d` tag are invalid
 for the normal order group pipeline.
@@ -537,7 +696,9 @@ listing owner.
 Role-marked `p` tags define the public participant tuple and routing hints. They
 do not reveal real identities when temporary trade keys are used. Participant
 pubkeys SHOULD be temporary trade keys when privacy can be preserved; real
-pubkeys are carried in encrypted `participant_proof` payloads when needed.
+pubkeys are carried in public `participant_proof` payloads only when deliberate
+disclosure is desired, or in sealed `participant_proof` payloads when only
+selected participants should resolve them.
 
 Clients MUST ignore lifecycle events from outsiders whose author pubkey is not
 one of the role-tagged participant pubkeys in the initial order anchor. Clients
@@ -593,7 +754,7 @@ After a completed or confirmed committed trade, a participant MAY publish a revi
   ["a", "<listing-anchor>"],
   ["rating", "<0-to-1-score>", "thumb"],
   ["r", "<order-anchor>"],
-  ["review_proof", "<role>", "<participant-or-temp-key-pubkey>", "<plaintext signed kind:1329 event JSON>"]
+  ["participant_proof", "1", "<role>", "<participant-pubkey>", "<proof-id>", "public", "<signed-kind-1329-event-json>"]
 ]
 ```
 
@@ -605,7 +766,7 @@ The `rating` tag contains the primary rating. The third element MUST be `thumb`.
 
 The `r` tag contains an order anchor (`<kind>:<pubkey>:<d-tag>`) linking the review to a specific trade participant event.
 
-The `review_proof` tag is marketplace-specific and MAY be omitted when the review is signed directly by an order participant pubkey. Clients SHOULD include it when the review is signed by an identity key but the public order participant is a temporary trade key. Generic Gamma-compatible clients can ignore this tag.
+The `participant_proof` tag is marketplace-specific and MAY be omitted when the review is signed directly by an order participant pubkey. Clients SHOULD include a public `participant_proof` when the review is signed by an identity key but the public order participant is a temporary trade key. Generic Gamma-compatible clients can ignore this tag. Implementations MUST NOT publish or parse legacy `review_proof` tags.
 
 ### Content
 
@@ -625,7 +786,7 @@ A review is valid only if:
 4. the order group is confirmed committed;
 5. either:
    - the review pubkey appears as an order participant pubkey in the referenced order group; or
-   - the `review_proof` tag's authorization payload hashes to a `participant_proof` payload hash in the referenced order group, and the decoded `kind:1329` authorization event is valid and matches the claimed role, participant pubkey, listing anchor, trade id, and order group ID when present.
+   - a public `participant_proof` tag contains a signed `kind:1329` authorization event whose event id equals the tag proof id, whose identity pubkey is the review author, and whose role, participant pubkey, listing anchor, trade id, and order group ID match the referenced order group.
 
 This NIP does not define a canonical on-chain or block-time proof that the review was written after the order ended. Clients MAY additionally require the order end time to be in the past or a terminal payment event to exist, but those timing rules are application policy unless standardized separately.
 
@@ -636,7 +797,7 @@ This NIP does not define a canonical on-chain or block-time proof that the revie
 1. Buyer discovers a NIP-99 listing.
 2. Buyer allocates a trade id and temporary trade key (temp-key). Deterministic derivation is optional and described in the addendum below.
 3. Buyer creates a `kind:32122` order signed by the temporary trade key (temp-key), carrying `["trade", "<trade-id>"]` and a `d` tag derived from the buyer/seller participant tuple.
-4. Buyer includes role-marked `buyer` and `seller` participant `p` tags and encrypted `participant_proof` tags as needed.
+4. Buyer includes role-marked `buyer` and `seller` participant `p` tags and public or sealed `participant_proof` tags as needed.
 5. Buyer sends the order as a child event inside a private `kind:1327` rumor tagged `["conversation", "<trade-id>"]`, delivered with NIP-59 gift wraps to the resolved seller participant and self.
 
 ### 2. Negotiation
@@ -645,17 +806,17 @@ This NIP does not define a canonical on-chain or block-time proof that the revie
 7. If the seller accepts the current terms, the seller replies with an order for those terms and embeds a signed `kind:1328` commit authorization.
 8. Counteroffers continue privately until terms are accepted or cancelled.
 
-### 3. Escrow Selection and Payment
+### 3. Arbitration Service Selection and Payment
 
-9. If escrow-backed, buyer selects an escrow service, computes the escrow-backed order group ID from the same trade id plus buyer/seller/escrow participant tuple, and sends a private `kind:30302` Escrow Service Selected child event inside a `kind:1327` rumor tagged `["conversation", "<trade-id>"]`.
+9. If escrow-backed, buyer selects an arbitration service, computes the escrow-backed order group ID from the same trade id plus buyer/seller/arbiter participant tuple, and sends a private `kind:30302` Arbitration Service Selected child event inside a `kind:1327` rumor tagged `["conversation", "<trade-id>"]`.
 10. Buyer funds escrow directly or via a Lightning-to-on-chain swap.
 
 ### 4. Commitment
 
-11. Once payment proof exists, the buyer or temporary trade key (temp-key) publishes a public `kind:32122` order anchor with `d=<order-group-id>`, `trade=<trade-id>`, and canonical participant `p` tags for buyer, seller, and escrow when escrow-backed.
-12. Buyer publishes a linked `kind:32123` Payment event with `d=<order-group-id>` and `["e", "<order-event-id>", "<relay-hint>", "order"]`.
+11. Once payment proof exists, the buyer or temporary trade key (temp-key) publishes a public `kind:32122` order anchor with `d=<order-group-id>`, `trade=<trade-id>`, canonical participant `p` tags for buyer, seller, and arbiter when escrow-backed, and the full signed listing snapshot in `content.listing`.
+12. Buyer publishes a linked `kind:32123` Payment event with `d=<order-group-id>` and `["e", "<order-event-id>", "<relay-hint>", "order"]`. The payment proof is public by default; if sealed, the buyer includes `payment_proof_key` tags for seller, arbiter, and self.
 <!-- Order Transition publication step intentionally commented out. -->
-13. Buyer and seller SHOULD publish `kind:32124` Payment Ack events that reference the Payment event. Escrow MAY publish a Payment Ack after validation or a `kind:32127` Payment Nack when the proof is inadequate.
+13. Buyer and seller SHOULD publish `kind:32124` Payment Ack events that reference the Payment event. Arbiter MAY publish a Payment Ack after validation or a `kind:32127` Payment Nack when the proof is inadequate.
 14. Release, refund, split, or claim data is published as a `kind:32125` Payment Settlement event that references the Payment event and any consumed Payment Ack events.
 
 ### 5. Cancellation
@@ -670,7 +831,11 @@ refund, release, or split.
 
 Clients MUST only consider public order groups after applying the Order Group validity ordering when computing listing availability. Negotiation orders are exchanged only between buyer and seller via gift-wrapped private structured messages, so they are not part of public listing availability calculations.
 
-Order clients SHOULD verify that the referenced listing is an active NIP-99 listing before displaying or accepting an order.
+Order clients SHOULD verify that the embedded listing snapshot is an active
+NIP-99 listing whose event address matches the order `a` tag before displaying
+or accepting an order. Clients MAY use the `a` tag to fetch the latest listing
+for UI context, but self-contained order validation MUST use the embedded
+snapshot captured in the signed order.
 
 ## Addendum: How to Choose Temporary Keys
 
