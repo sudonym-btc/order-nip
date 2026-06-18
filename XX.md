@@ -316,19 +316,21 @@ Availability verification is based on public order groups after applying the val
 
 Order verification is a separate step from payment proof verification:
 
-1. Verify the Payment proof using only the self-contained `paymentProof.params`
-   and the selected driver.
-2. Normalize the driver's verified payment terms, such as `paymentAmount`,
-   optional security bond amount, optional escrow fee, unlock time, asset, and
-   participant/payment identifiers.
+1. Verify the Payment proof using the selected driver and the self-proclaimed
+   `paymentProof.terms` (or decrypted `paymentProof.sealedTerms`) plus
+   driver-specific `paymentProof.params`.
+2. The driver MUST confirm that the method-specific proof locks the funds in
+   exactly the way described by those payment terms. Once accepted, higher-level
+   order and auction logic consumes the verified terms and does not need to
+   inspect driver-specific proof internals.
 3. Verify the Order using the signed embedded listing snapshot. The validator
    derives the expected price from the listing snapshot, `quantity`, `start`,
    and `end`; compares the order amount to that derived price; and compares the
    sum of accepted verified payment terms to the order requirements.
 
 Payment proof validation MUST NOT require the order or listing. Order
-validation MAY consume the normalized terms returned by one or more successful
-payment proof validations.
+validation MAY consume the verified public terms returned by one or more
+successful payment proof validations.
 
 ## Payment Lifecycle Events
 
@@ -377,6 +379,40 @@ Public payment content is JSON:
   "proof": {
     "paymentProof": {
       "driver": "evm:multi-escrow",
+      "terms": {
+        "version": 1,
+        "asset": {
+          "value": "50000",
+          "denomination": "BTC",
+          "decimals": 8,
+          "assetId": "33:0x0000000000000000000000000000000000000000"
+        },
+        "parties": [
+          { "role": "buyer", "id": "<buyer-payment-identity>" },
+          { "role": "seller", "id": "<seller-payment-identity>" },
+          { "role": "arbiter", "id": "<arbiter-payment-identity>" }
+        ],
+        "lock": {
+          "id": "<driver-lock-id>",
+          "policyId": "evm:multi-escrow",
+          "kind": "contract",
+          "amount": {
+            "value": "50000",
+            "denomination": "BTC",
+            "decimals": 8,
+            "assetId": "33:0x0000000000000000000000000000000000000000"
+          },
+          "controls": [
+            { "role": "buyer", "id": "<buyer-payment-identity>" },
+            { "role": "seller", "id": "<seller-payment-identity>" },
+            { "role": "arbiter", "id": "<arbiter-payment-identity>" }
+          ],
+          "conditions": {
+            "arbitration": { "type": "continuous", "denominator": "1000000" }
+          },
+          "paths": []
+        }
+      },
       "params": {
         "txHash": "<evm-transaction-hash>",
         "chainId": 33,
@@ -401,13 +437,32 @@ Public payment content is JSON:
 }
 ```
 
-The `proof.paymentProof` object is keyed by the payment driver and carries
-driver-specific `params`. Payment params MUST be self-contained verifier inputs:
-validators MUST NOT require the referenced order, auction bid, or listing event
-to determine whether the payment proof itself is valid. Order/bid/listing data
-MAY still be used by higher-level marketplace logic after proof validation.
+The `proof.paymentProof` object is keyed by the payment driver and carries:
+
+- `driver`: the opaque driver/policy identifier;
+- `terms`: the public, application-independent statement of what is locked; or
+- `sealedTerms`: a sealed `terms` envelope when the public should not see the
+  lock amounts or paths; and
+- `params`: method-specific evidence, transaction ids, signatures, proofs,
+  calldata, or encrypted params needed by the driver.
+
+Payment params and terms MUST be self-contained verifier inputs: validators
+MUST NOT require the referenced order, auction bid, or listing event to
+determine whether the payment proof itself is valid. Order/bid/listing data MAY
+still be used by higher-level marketplace logic after proof validation.
 Arbitration-specific context, when needed, is attached beside the generic
 payment proof under `proof.arbitration`.
+
+The driver validates the proof by checking that `params` lock spendable funds
+according to the declared `terms`. A Payment Ack/Nack is a statement about that
+payment proof and its declared terms only. It is not a statement that those
+terms satisfy a particular order, bid, listing, reserve, or auction rule.
+
+Payment terms are recursive and driver-neutral. The top-level `lock` describes
+the currently locked funds. Each `path` describes one possible outcome. A path
+can terminate into role-addressed outputs, or into a new lock whose own paths
+describe later outcomes. This lets Cashu express discrete presigned split
+chunks while EVM or Liquid drivers can expose continuous settlement conditions.
 
 The entire `paymentProof.params` object MAY be encrypted while leaving the
 driver visible:
@@ -434,6 +489,33 @@ the params, using the encrypted params `proofId` as the key id. This is separate
 from sealing the whole `proof` field; implementations MAY use either privacy
 mode, but validators must receive clear params or a decryptor before reading
 driver-specific fields.
+
+The `paymentProof.terms` object MAY also be sealed independently while keeping
+`driver` and `params` visible:
+
+```jsonc
+{
+  "paymentProof": {
+    "driver": "evm:multi-escrow",
+    "sealedTerms": {
+      "version": 1,
+      "mode": "sealed:v1",
+      "proofId": "<sha256-of-canonical-clear-terms>",
+      "payload": "<sealed-payment-terms-payload>"
+    },
+    "params": {
+      "txHash": "<evm-transaction-hash>"
+    }
+  }
+}
+```
+
+When terms are sealed, the plaintext is the JSON-encoded clear terms object.
+`proofId` is the SHA-256 hash of that canonical terms object. The payer MUST
+add `payment_proof_key` tags for recipients that should decrypt the terms,
+using the sealed terms `proofId` as the key id. Implementations MAY seal params,
+terms, or the whole proof, depending on which public metadata should remain
+visible.
 
 Sealed payment content uses the same `proof` field, but the value is a sealed
 envelope:
@@ -485,6 +567,19 @@ drivers; for example, an EVM arbitration service uses an EVM escrow driver.
 {
   "paymentProof": {
     "driver": "zap",
+    "terms": {
+      "version": 1,
+      "asset": { "value": "50000", "denomination": "SAT", "decimals": 0 },
+      "parties": [],
+      "lock": {
+        "id": "<zap-receipt-id>",
+        "policyId": "zap",
+        "kind": "direct",
+        "amount": { "value": "50000", "denomination": "SAT", "decimals": 0 },
+        "controls": [],
+        "paths": []
+      }
+    },
     "params": {
       "receipt": { "...": "zap receipt event JSON" },
       "recipientProfile": { "...": "seller profile metadata event JSON" }
@@ -502,6 +597,7 @@ zap receipt LNURL matches the seller's signed current payment address.
 {
   "paymentProof": {
     "driver": "evm:multi-escrow",
+    "terms": { "...": "driver-neutral lock terms as above" },
     "params": {
       "txHash": "<evm-transaction-hash>",
       "chainId": 33,
@@ -526,13 +622,15 @@ zap receipt LNURL matches the seller's signed current payment address.
 
 For EVM escrow-backed orders, `paymentProof.driver` identifies the concrete EVM
 driver and `paymentProof.params.txHash` is the transaction hash to verify.
-`params` MUST also include the payment construction data needed to compare the
-decoded `TradeCreated` log: chain id, trade id, seller, arbiter, asset,
-payment amount, optional bond amount, optional escrow fee, timeout claimant or
-unlock time when used, and context/recycle hashes when used. Contract address
-and bytecode hash MAY be omitted when the verifier has the driver configuration
-needed to locate the escrow contract. The `arbitration` context is required only
-to interpret that EVM payment proof as satisfying a selected payment method.
+`params` MUST include the method-specific evidence needed to find and decode the
+funding action. The public or decrypted `terms` MUST include the asset, parties,
+lock amount, controls, and settlement paths or continuous arbitration condition
+that the EVM proof is claiming. Contract address and bytecode hash MAY be
+omitted from params when the verifier has the driver configuration needed to
+locate the escrow contract, but the driver MUST still verify that the decoded
+contract state conforms to the supplied terms. The `arbitration` context is
+required only to interpret that EVM payment proof as satisfying a selected
+payment method.
 `paymentMethod` MUST include the seller's `["i", "evm:address:<address>",
 "eip191:<signature>"]` ownership proof. See the Arbitration Services NIP for the
 exact proof payload and payment verification requirements.
@@ -612,6 +710,17 @@ packet, deterministic restore metadata, or a fully authorized collaborative swap
 template. For EVM, settlement events usually reference on-chain settlement
 transactions and are advisory because refunds, releases, and losing bids can be
 independently verified on chain.
+
+Each Payment Settlement event settles exactly one Payment event. When one
+order, promoted auction order, or other payment group contains multiple Payment
+events, arbitration MAY calculate the desired split across the group as a whole,
+but it MUST publish one Payment Settlement event per Payment. The settlement
+outputs on each event are that payment's proportional allocation of the group
+decision, unless the payment terms define a different exact allocation rule.
+For example, if a group contains accepted payments of `15000` and `10000` and
+the arbiter settles the group 50/50 between seller and buyer, the first
+settlement outputs `7500` and `7500`, and the second outputs `5000` and
+`5000`.
 
 ### Order Cancel (`kind:32126`)
 
